@@ -132,6 +132,33 @@
   idealBank.mount('#ideal-bank-element');
 
   /**
+   * Add a BECS element that matches the look-and-feel of the app.
+   * 
+   * This allows you to collect australian bank account details
+   */
+
+  const becsBank = elements.create('auBankAccount', {style})
+
+  // Mount the BECS element on the page.
+  becsBank.mount('#becs-bank-element')
+
+  // Monitor change events on the BECS Element to display any errors.
+  becsBank.on('change', ({error, bankName}) => {
+    const becsBankErrors = document.getElementById('becs-errors');
+    if (error) {
+      becsBankErrors.textContent = error.message;
+      becsBankErrors.classList.add('visible');
+    } else {
+      becsBankErrors.classList.remove('visible');
+      if (bankName) {
+        updateButtonLabel('au_becs_debit', bankName);
+      }
+    }
+    // Re-enable the Pay button.
+    submitButton.disabled = false;
+  });
+
+  /**
    * Implement a Stripe Payment Request Button Element.
    *
    * This automatically supports the Payment Request API (already live on Chrome),
@@ -200,6 +227,7 @@
 
   // Callback when the shipping option is changed.
   paymentRequest.on('shippingoptionchange', async (event) => {
+    currency = form.querySelector('select[name=currency] option:checked').value;
     // Update the PaymentIntent to reflect the shipping cost.
     const response = await store.updatePaymentIntentWithShippingCost(
       paymentIntent.id,
@@ -215,7 +243,7 @@
     });
     const amount = store.formatPrice(
       response.paymentIntent.amount,
-      config.currency
+      currency
     );
     updateSubmitButtonPayText(`Pay ${amount}`);
   });
@@ -254,10 +282,20 @@
       event.preventDefault();
       selectCountry(event.target.value);
     });
+  
+  // Listen to changes to the user-selected currency
+  form
+    .querySelector('select[name=currency]')
+    .addEventListener('change', (event) => {
+      event.preventDefault();
+      selectCurrency(event.target.value);
+    });
 
   // Submit handler for our payment form.
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
+
+    let update_error = false;
 
     // Retrieve the user information from the form.
     const payment = form.querySelector('input[name=payment]:checked').value;
@@ -283,85 +321,118 @@
     submitButton.disabled = true;
     submitButton.textContent = 'Processing…';
 
-    if (payment === 'card') {
-      // Let Stripe.js handle the confirmation of the PaymentIntent with the card Element.
-      const response = await stripe.confirmCardPayment(
-        paymentIntent.client_secret,
-        {
-          payment_method: {
-            card,
-            billing_details: {
-              name,
-              address: billingAddress,
-            },
-          },
-          shipping,
+    // Update Payment Intent if currency is different to default
+    if(config.currency !== form.querySelector('select[name=currency] option:checked').value)
+    {
+      let currency = form.querySelector('select[name=currency] option:checked').value
+      const response = await store.updatePaymentIntentWithCurrency( 
+        paymentIntent.id,
+        store.getLineItems(),
+        null,
+        currency,
+        );
+        
+        if(response.error){
+          handleError(response);
+          update_error = true
         }
-      );
-      handlePayment(response);
-    } else if (payment === 'sepa_debit') {
-      // Confirm the PaymentIntent with the IBAN Element.
-      const response = await stripe.confirmSepaDebitPayment(
-        paymentIntent.client_secret,
-        {
-          payment_method: {
-            sepa_debit: iban,
-            billing_details: {
-              name,
-              email,
-            },
-          },
-        }
-      );
-      handlePayment(response);
-    } else {
-      // Prepare all the Stripe source common data.
-      const sourceData = {
-        type: payment,
-        amount: paymentIntent.amount,
-        currency: paymentIntent.currency,
-        owner: {
-          name,
-          email,
-        },
-        redirect: {
-          return_url: window.location.href,
-        },
-        statement_descriptor: 'Stripe Payments Demo',
-        metadata: {
-          paymentIntent: paymentIntent.id,
-        },
-      };
-
-      // Add extra source information which are specific to a payment method.
-      switch (payment) {
-        case 'ideal':
-          // Confirm the PaymentIntent with the iDEAL bank Element.
-          // This will redirect to the banking site.
-          stripe.confirmIdealPayment(paymentIntent.client_secret, {
+    }
+    if(!update_error){
+      if (payment === 'card') {
+        // Let Stripe.js handle the confirmation of the PaymentIntent with the card Element.
+        const response = await stripe.confirmCardPayment(
+          paymentIntent.client_secret,
+          {
             payment_method: {
-              ideal: idealBank,
+              card,
+              billing_details: {
+                name,
+                address: billingAddress,
+              },
             },
-            return_url: window.location.href,
-          });
-          return;
-          break;
-        case 'sofort':
-          // SOFORT: The country is required before redirecting to the bank.
-          sourceData.sofort = {
-            country,
-          };
-          break;
-        case 'ach_credit_transfer':
-          // ACH Bank Transfer: Only supports USD payments, edit the default config to try it.
-          // In test mode, we can set the funds to be received via the owner email.
-          sourceData.owner.email = `amount_${paymentIntent.amount}@example.com`;
-          break;
+            shipping,
+          }
+        );
+        handlePayment(response);
+      } else if (payment === 'sepa_debit') {
+        // Confirm the PaymentIntent with the IBAN Element.
+        const response = await stripe.confirmSepaDebitPayment(
+          paymentIntent.client_secret,
+          {
+            payment_method: {
+              sepa_debit: iban,
+              billing_details: {
+                name,
+                email,
+              },
+            },
+          }
+        );
+        handlePayment(response);
+      } else if (payment == 'au_becs_debit'){
+          const response = await stripe.confirmAuBecsDebitPayment(
+            paymentIntent.client_secret,
+            {
+              payment_method: {
+                au_becs_debit: becsBank,
+                billing_details: {
+                  name,
+                  email, 
+                }
+              }
+            }
+          );
+          handlePayment(response);
       }
+      else {
+        // Prepare all the Stripe source common data.
+        const sourceData = {
+          type: payment,
+          amount: paymentIntent.amount,
+          currency: paymentIntent.currency,
+          owner: {
+            name,
+            email,
+          },
+          redirect: {
+            return_url: window.location.href,
+          },
+          statement_descriptor: 'Stripe Payments Demo',
+          metadata: {
+            paymentIntent: paymentIntent.id,
+          },
+        };
 
-      // Create a Stripe source with the common data and extra information.
-      const {source} = await stripe.createSource(sourceData);
-      handleSourceActiviation(source);
+        // Add extra source information which are specific to a payment method.
+        switch (payment) {
+          case 'ideal':
+            // Confirm the PaymentIntent with the iDEAL bank Element.
+            // This will redirect to the banking site.
+            stripe.confirmIdealPayment(paymentIntent.client_secret, {
+              payment_method: {
+                ideal: idealBank,
+              },
+              return_url: window.location.href,
+            });
+            return;
+            break;
+          case 'sofort':
+            // SOFORT: The country is required before redirecting to the bank.
+            sourceData.sofort = {
+              country,
+            };
+            break;
+          case 'ach_credit_transfer':
+            // ACH Bank Transfer: Only supports USD payments, edit the default config to try it.
+            // In test mode, we can set the funds to be received via the owner email.
+            sourceData.owner.email = `amount_${paymentIntent.amount}@example.com`;
+            break;
+        }
+
+        // Create a Stripe source with the common data and extra information.
+        const {source} = await stripe.createSource(sourceData);
+        handleSourceActiviation(source);
+      }
     }
   });
 
@@ -407,8 +478,32 @@
     }
   };
 
+  const handleError = (updateResponse) => {
+    
+    // handle any error
+    const {paymentIntent, error} = updateResponse;
+
+    const mainElement = document.getElementById('main');
+    const confirmationElement = document.getElementById('confirmation');
+
+    if (error && error.type === 'validation_error') {
+      mainElement.classList.remove('processing');
+      mainElement.classList.remove('receiver');
+      submitButton.disabled = false;
+      submitButton.textContent = submitButtonPayText;
+    } else if (error) {
+      mainElement.classList.remove('processing');
+      mainElement.classList.remove('receiver');
+      confirmationElement.querySelector('.error-message').innerText =
+        error.message;
+      mainElement.classList.add('error');
+    } 
+    
+  }
+
   // Handle activation of payment sources not yet supported by PaymentIntents
   const handleSourceActiviation = (source) => {
+    let currency = form.querySelector('select[name=currency] option:checked').value;
     const mainElement = document.getElementById('main');
     const confirmationElement = document.getElementById('confirmation');
     switch (source.flow) {
@@ -429,7 +524,7 @@
           form.querySelector('.payment-info.wechat p').style.display = 'none';
           let amount = store.formatPrice(
             store.getPaymentTotal(),
-            config.currency
+            currency
           );
           updateSubmitButtonPayText(
             `Scan this QR code on WeChat to pay ${amount}`
@@ -454,7 +549,7 @@
         const receiverInfo = confirmationElement.querySelector(
           '.receiver .info'
         );
-        let amount = store.formatPrice(source.amount, config.currency);
+        let amount = store.formatPrice(source.amount, currency);
         switch (source.type) {
           case 'ach_credit_transfer':
             // Display the ACH Bank Transfer information to the user.
@@ -683,11 +778,30 @@
         'usd',
       ],
     },
+    au_becs_debit: {
+      name: 'BECS Direct Debit',
+      flow: 'none',
+      countries: [
+        'AU',
+      ],
+      currencies: [
+        'aud',
+      ]
+    },
   };
+
+ 
 
   // Update the main button to reflect the payment method being selected.
   const updateButtonLabel = (paymentMethod, bankName) => {
-    let amount = store.formatPrice(store.getPaymentTotal(), config.currency);
+    let currency = form.querySelector('select[name=currency] option:checked').value;
+    
+    let fx = 1; // default to FX of 1
+    if(currency in config.currencyFX){
+      fx = config.currencyFX[currency];
+    }
+
+    let amount = store.formatPrice(store.getPaymentTotal() * fx, currency);
     let name = paymentMethods[paymentMethod].name;
     let label = `Pay ${amount}`;
     if (paymentMethod !== 'card') {
@@ -699,6 +813,10 @@
     if (paymentMethod === 'sepa_debit' && bankName) {
       label = `Debit ${amount} from ${bankName}`;
     }
+    if (paymentMethod == 'au_becs_debit' && bankName){
+      label = `Debit ${amount} from ${bankName}`;
+    }
+
     updateSubmitButtonPayText(label);
   };
 
@@ -711,6 +829,24 @@
     showRelevantFormFields();
     showRelevantPaymentMethods();
   };
+
+  const selectCurrency = (currency) => {
+    const selector = document.getElementById('currency');
+    selector.querySelector(`option[value=${currency}]`).selected = 'selected';
+    selector.className = `field ${country.toLowerCase()}`;
+    
+
+    if(currency !== config.currency){
+      let fx = config.currencyFX[currency];
+      let amount = store.formatPrice(store.getPaymentTotal() * fx, currency);
+      //if the currency is different display also update the fx note
+      document.getElementById('currency-fx-info').textContent = `Converted Total: ${amount} \n(1 ${config.currency.toUpperCase()} = ${fx} ${currency.toUpperCase()})`;      
+    }
+
+    // Trigger the methods to show relevant payment methods on page load.
+    showRelevantPaymentMethods();
+  };
+
 
   // Show only form fields that are relevant to the selected country.
   const showRelevantFormFields = (country) => {
@@ -761,19 +897,24 @@
   };
 
   // Show only the payment methods that are relevant to the selected country.
-  const showRelevantPaymentMethods = (country) => {
+  const showRelevantPaymentMethods = (country, currency) => {
     if (!country) {
       country = form.querySelector('select[name=country] option:checked').value;
     }
+
+    if(!currency) {
+      currency = form.querySelector('select[name=currency] option:checked').value;
+    }
+
     const paymentInputs = form.querySelectorAll('input[name=payment]');
     for (let i = 0; i < paymentInputs.length; i++) {
       let input = paymentInputs[i];
       input.parentElement.classList.toggle(
         'visible',
         input.value === 'card' ||
-          (config.paymentMethods.includes(input.value) &&
+          (config.paymentMethodsPerCurrency[currency].includes(input.value) &&
             paymentMethods[input.value].countries.includes(country) &&
-            paymentMethods[input.value].currencies.includes(config.currency))
+            paymentMethods[input.value].currencies.includes(currency))
       );
     }
 
@@ -791,6 +932,7 @@
     form.querySelector('.payment-info.sepa_debit').classList.remove('visible');
     form.querySelector('.payment-info.wechat').classList.remove('visible');
     form.querySelector('.payment-info.redirect').classList.remove('visible');
+    form.querySelector('.payment-info.au_becs_debit').classList.remove('visible');
     updateButtonLabel(paymentInputs[0].value);
   };
 
@@ -817,6 +959,9 @@
       form
         .querySelector('.payment-info.wechat')
         .classList.toggle('visible', payment === 'wechat');
+      form
+        .querySelector('.payment-info.au_becs_debit')
+        .classList.toggle('visible', payment === 'au_becs_debit');
       form
         .querySelector('.payment-info.redirect')
         .classList.toggle('visible', flow === 'redirect');
